@@ -13,3 +13,4 @@ chroma/
 *.log
 *.png
 analysis_output/
+clarification_output/

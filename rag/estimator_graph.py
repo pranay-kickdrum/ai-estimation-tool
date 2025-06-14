@@ -188,7 +188,8 @@ class EstimationState(TypedDict):
     1. Input document content
     2. Analysis results and their file location
     3. Review and revision tracking
-    4. Conversation memory
+    4. Clarification questions and responses
+    5. Conversation memory
     
     Attributes:
         prd_doc: The content of the PRD document being analyzed
@@ -197,6 +198,10 @@ class EstimationState(TypedDict):
         review_feedback: User's feedback type (accept/revise/add/remove)
         revision_requests: List of specific revision requests from the user
         revision_history: History of changes made during revisions
+        clarification_questions: Generated questions for requirement clarification
+        clarification_file: Path to the JSON file containing clarification questions
+        clarification_responses: User's responses to clarification questions
+        clarification_history: History of question updates and responses
         messages: List of conversation messages
         conversation_memory: State of the conversation memory
     """
@@ -211,6 +216,12 @@ class EstimationState(TypedDict):
     review_feedback: Optional[Literal["accept", "revise", "add", "remove"]]
     revision_requests: Optional[List[str]]  # List of specific revision requests
     revision_history: Optional[List[Dict[str, Any]]]  # Track changes made
+    
+    # Clarification tracking
+    clarification_questions: Optional[Dict[str, Any]]  # Generated clarification questions and summary
+    clarification_file: Optional[str]  # Path to the clarification questions file
+    clarification_responses: Optional[List[Dict[str, Any]]]  # User's responses to questions
+    clarification_history: Optional[List[Dict[str, Any]]]  # History of question updates and responses
     
     # Conversation tracking
     messages: Annotated[list, add_messages]
@@ -1583,6 +1594,221 @@ def visualize_graph_mermaid(graph, output_path: str = None):
         logger.error(f"Failed to visualize graph: {e}")
         raise
 
+def generate_clarification_questions(state: EstimationState) -> EstimationState:
+    """Generate specific, actionable questions for requirement clarification.
+    
+    This function analyzes the accepted PRD analysis to identify areas that need
+    clarification for accurate estimation. It generates focused questions based on
+    technical requirements, deployment scenarios, integration details, and scope boundaries.
+    
+    Args:
+        state: Current state containing the accepted analysis
+        
+    Returns:
+        Updated state with:
+        - clarification_questions: Generated questions and summary
+        - clarification_file: Path to saved questions file
+        - clarification_responses: Empty list for future responses
+        - clarification_history: Initial history entry
+        - Updated messages and conversation memory
+    """
+    try:
+        # Get the accepted analysis
+        analysis = state["prd_analysis"]
+        if not analysis:
+            raise ValueError("No analysis results found in state")
+        
+        # Create a prompt for generating clarification questions
+        prompt = f"""As a Senior Technical Analyst at Kickdrum, analyze this PRD analysis and generate specific, 
+        actionable questions that stakeholders need to answer for accurate project estimation.
+        
+        Current Analysis:
+        {json.dumps(analysis, indent=2)}
+        
+        Generate questions following these rules:
+        1. Reference specific sections/requirements
+        2. One focused question per unclear point
+        3. Technical and specific - avoid generic questions
+        4. Answerable in 1-2 concrete sentences
+        5. Focus on items that could change effort by >4 hours
+        
+        Priority Areas to Examine:
+        - Deployment & Infrastructure
+        - Integration & APIs
+        - Scope Boundaries
+        - Technical Specifications
+        - Data & Security
+        - User Experience
+        
+        Return a JSON object with this structure:
+        {{
+            "clarification_questions": [
+                {{
+                    "reference": "Exact requirement ID, section title, or quoted text",
+                    "question": "Specific, direct question",
+                    "category": "technical|business|integration|deployment|data|security",
+                    "effort_variance": "Estimated hour range difference",
+                    "assumptions_if_unresolved": "What assumptions will be made if unanswered",
+                    "priority": "high|medium|low",
+                    "status": "pending",  # Add status field for tracking
+                    "question_id": "Q1",  # Add unique ID for each question
+                    "created_at": "timestamp"  # Add creation timestamp
+                }}
+            ],
+            "summary": {{
+                "total_questions": "Number of questions",
+                "high_priority_count": "Number of high-priority questions",
+                "main_risk_areas": ["List of primary areas with unclear requirements"],
+                "estimation_confidence": "low|medium|high",
+                "generated_at": "timestamp"  # Add generation timestamp
+            }}
+        }}
+        
+        Return ONLY the JSON object, no additional text."""
+        
+        # Get questions from LLM
+        response = llm.invoke([{"role": "user", "content": prompt}])
+        
+        # Log token usage
+        log_token_usage(prompt, response.content, "generate_clarification_questions")
+        
+        # Clean and parse the response
+        content = response.content.strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+        
+        try:
+            clarification_data = json.loads(content)
+            
+            # Validate the structure
+            required_keys = ["clarification_questions", "summary"]
+            for key in required_keys:
+                if key not in clarification_data:
+                    raise ValueError(f"Missing required key: {key}")
+            
+            # Add metadata to questions
+            timestamp = datetime.now().isoformat()
+            for i, q in enumerate(clarification_data["clarification_questions"], 1):
+                q["question_id"] = f"Q{i}"
+                q["status"] = "pending"
+                q["created_at"] = timestamp
+            
+            # Add metadata to summary
+            clarification_data["summary"]["generated_at"] = timestamp
+            
+            # Display the questions with pretty printing
+            console.print("\n[bold blue]Requirement Clarification Questions[/bold blue]\n")
+            console.print(Panel(
+                Text("Review and respond to the following questions to clarify project requirements and reduce estimation uncertainty.", style="white"),
+                border_style="blue"
+            ))
+            # Group questions by category
+            questions_by_category = {}
+            for q in clarification_data["clarification_questions"]:
+                category = q["category"]
+                if category not in questions_by_category:
+                    questions_by_category[category] = []
+                questions_by_category[category].append(q)
+            
+            # Display questions by category
+            for category, questions in questions_by_category.items():
+                console.print(f"\n[bold]{category.title()} Questions[/bold]")
+                for i, q in enumerate(questions, 1):
+                    priority_color = {
+                        "high": "red",
+                        "medium": "yellow",
+                        "low": "green"
+                    }.get(q["priority"], "white")
+                    
+                    status_color = {
+                        "pending": "yellow",
+                        "answered": "green",
+                        "updated": "blue"
+                    }.get(q["status"], "white")
+                    
+                    console.print(Panel(
+                        Text.assemble(
+                            f"ID: {q['question_id']}\n",
+                            f"Reference: {q['reference']}\n", 
+                            f"Question: {q['question']}\n",
+                            f"Effort Variance: {q['effort_variance']}\n",
+                            f"Assumptions if Unresolved: {q['assumptions_if_unresolved']}\n",
+                            f"[{priority_color}]Priority: {q['priority'].upper()}[/{priority_color}]\n",
+                            f"[{status_color}]Status: {q['status'].upper()}[/{status_color}]"
+                        ),
+                        border_style=priority_color
+                    ))
+            
+            # Display summary
+            summary = clarification_data["summary"]
+            console.print("\n[bold]Summary[/bold]")
+            console.print(Panel(
+                Text.assemble(
+                    f"Total Questions: {summary['total_questions']}\n",
+                    f"High Priority Questions: {summary['high_priority_count']}\n",
+                    f"Main Risk Areas: {', '.join(summary['main_risk_areas'])}\n",
+                    f"Estimation Confidence: {summary['estimation_confidence'].upper()}\n",
+                    f"Generated: {summary['generated_at']}"
+                ),
+                border_style="blue"
+            ))
+            
+            # Save questions to file
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = "clarification_output"
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, f"clarification_questions_{timestamp}.json")
+            
+            with open(output_path, 'w') as f:
+                json.dump(clarification_data, f, indent=2)
+            
+            logger.info(f"Clarification questions saved to: {output_path}")
+            
+            # Create initial history entry
+            history_entry = {
+                "timestamp": timestamp,
+                "action": "generated",
+                "questions_count": len(clarification_data["clarification_questions"]),
+                "high_priority_count": summary["high_priority_count"],
+                "estimation_confidence": summary["estimation_confidence"]
+            }
+            
+            # Update state with all clarification-related fields
+            return {
+                **state,
+                "clarification_questions": clarification_data,
+                "clarification_file": output_path,
+                "clarification_responses": [],  # Initialize empty responses list
+                "clarification_history": [history_entry],  # Initialize history with first entry
+                "messages": state.get("messages", []) + [
+                    {"role": "assistant", "content": f"Generated {summary['total_questions']} clarification questions. Results saved to: {output_path}"}
+                ],
+                "conversation_memory": update_conversation_memory(
+                    state,
+                    "assistant",
+                    f"Generated {summary['total_questions']} clarification questions for requirement analysis"
+                )
+            }
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse clarification questions: {e}")
+            logger.error(f"Raw response: {content}")
+            raise ValueError("Failed to generate valid clarification questions")
+            
+    except Exception as e:
+        logger.error(f"Error generating clarification questions: {e}")
+        return {
+            **state,
+            "messages": state.get("messages", []) + [
+                {"role": "system", "content": f"Error generating clarification questions: {str(e)}"}
+            ]
+        }
+
 def create_estimation_graph():
     # Create graph with system recursion limit
     builder = StateGraph(
@@ -1598,6 +1824,7 @@ def create_estimation_graph():
     builder.add_node("review_analysis", review_analysis)
     builder.add_node("revise_analysis", revise_analysis)
     builder.add_node("summarize_analysis", summarize_analysis)
+    builder.add_node("generate_clarification_questions", generate_clarification_questions)
     
     # Set entry point
     builder.set_entry_point("analyze_prd")
@@ -1618,8 +1845,11 @@ def create_estimation_graph():
     # Add edge from revise back to review
     builder.add_edge("revise_analysis", "review_analysis")
     
+    # Add edge from summarize to clarification questions
+    builder.add_edge("summarize_analysis", "generate_clarification_questions")
+    
     # Add final edge to end
-    builder.add_edge("summarize_analysis", END)
+    builder.add_edge("generate_clarification_questions", END)
     
     # Create the graph
     graph = builder.compile()
