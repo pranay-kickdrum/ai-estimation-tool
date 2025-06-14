@@ -7,7 +7,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from langchain.tools import tool
 from typing_extensions import Annotated
 from langgraph.graph.message import add_messages
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, trim_messages
 from langchain.text_splitter import (
     RecursiveCharacterTextSplitter,
     MarkdownHeaderTextSplitter,
@@ -31,10 +31,233 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from pathlib import Path
 import re
-# from langgraph.graph import visualize_graph
+import tiktoken
+import textwrap
 
 # Set up rich console
 console = Console()
+
+# Initialize tokenizer
+tokenizer = tiktoken.encoding_for_model("gpt-4")
+
+# Constants for memory management
+MAX_CONTEXT_TOKENS = 2000  # Maximum tokens to keep in context
+MAX_MEMORY_ITEMS = 5      # Maximum number of recent interactions to keep in full
+
+def count_tokens(text: str) -> int:
+    """Count the number of tokens in a text string."""
+    return len(tokenizer.encode(text))
+
+def log_token_usage(prompt: str, response: str, node_name: str):
+    """Log token usage for an LLM invocation."""
+    prompt_tokens = count_tokens(prompt)
+    response_tokens = count_tokens(response)
+    total_tokens = prompt_tokens + response_tokens
+    
+    logger.info(f"Token usage in {node_name}:")
+    logger.info(f"  Prompt tokens: {prompt_tokens}")
+    logger.info(f"  Response tokens: {response_tokens}")
+    logger.info(f"  Total tokens: {total_tokens}")
+    logger.info(f"  Estimated cost: ${(total_tokens/1000) * 0.03:.4f}")  # GPT-4 pricing
+
+def format_message(role: str, content: str) -> str:
+    """Format a message in a chat-like style."""
+    role_colors = {
+        "user": "blue",
+        "assistant": "green",
+        "system": "yellow"
+    }
+    color = role_colors.get(role.lower(), "white")
+    
+    # Wrap the content for better readability
+    wrapped_content = textwrap.fill(content, width=80)
+    
+    # Create a panel for the message
+    panel = Panel(
+        Text(wrapped_content, style=color),
+        title=f"[{color}]{role.upper()}[/{color}]",
+        border_style=color,
+        padding=(1, 2)
+    )
+    return panel
+
+def log_memory_usage(messages: List[Dict[str, Any]], operation: str):
+    """Log memory usage statistics in a clean format."""
+    total_tokens = sum(count_tokens(msg["content"]) for msg in messages)
+    utilization = (total_tokens/MAX_CONTEXT_TOKENS)*100
+    
+    # Create a memory usage panel
+    memory_panel = Panel(
+        Text.assemble(
+            f"Messages: {len(messages)}/{MAX_MEMORY_ITEMS}\n",
+            f"Tokens: {total_tokens}/{MAX_CONTEXT_TOKENS}\n",
+            f"Utilization: {utilization:.1f}%",
+            style="dim"
+        ),
+        title=f"[dim]Memory Usage ({operation})[/dim]",
+        border_style="dim",
+        padding=(1, 2)
+    )
+    console.print(memory_panel)
+
+class CustomMemory:
+    """Custom memory implementation using trim_messages for efficient message management."""
+    
+    def __init__(self, max_tokens: int = MAX_CONTEXT_TOKENS, max_messages: int = MAX_MEMORY_ITEMS):
+        self.max_tokens = max_tokens
+        self.max_messages = max_messages
+        self.messages: List[Dict[str, Any]] = []
+        self.tokenizer = tiktoken.encoding_for_model("gpt-4")
+        logger.info(f"Initialized CustomMemory with max_tokens={max_tokens}, max_messages={max_messages}")
+    
+    def _count_tokens(self, message: Any) -> int:
+        """Count tokens in a message or text string."""
+        if hasattr(message, 'content'):
+            # Handle LangChain message objects
+            text = message.content
+        elif isinstance(message, str):
+            # Handle plain strings
+            text = message
+        else:
+            # Handle other cases by converting to string
+            text = str(message)
+        
+        return len(self.tokenizer.encode(text))
+    
+    def add_message(self, role: str, content: str) -> None:
+        """Add a new message to memory."""
+        if role == "user":
+            message = HumanMessage(content=content)
+        elif role == "assistant":
+            message = AIMessage(content=content)
+        else:
+            message = SystemMessage(content=content)
+        
+        self.messages.append({"role": role, "content": content, "message": message})
+        log_memory_usage(self.messages, "before_trim")
+        self._trim_messages()
+        log_memory_usage(self.messages, "after_trim")
+    
+    def _trim_messages(self) -> None:
+        """Trim messages to stay within token and message limits."""
+        # First trim by message count
+        if len(self.messages) > self.max_messages:
+            self.messages = self.messages[-self.max_messages:]
+        
+        # Convert to LangChain message format
+        lc_messages = [msg["message"] for msg in self.messages]
+        
+        try:
+            # Then trim by token count using langchain_core's trim_messages
+            trimmed_messages = trim_messages(
+                lc_messages,
+                max_tokens=self.max_tokens,
+                token_counter=self._count_tokens
+            )
+            
+            # Update our messages list with trimmed messages
+            self.messages = [
+                {"role": msg.type, "content": msg.content, "message": msg}
+                for msg in trimmed_messages
+            ]
+        except Exception as e:
+            logger.error(f"Error trimming messages: {e}")
+            # Fallback: just keep the last N messages
+            self.messages = self.messages[-self.max_messages:]
+    
+    def get_messages(self) -> List[Dict[str, Any]]:
+        """Get all messages in memory."""
+        return self.messages
+    
+    def get_context(self) -> str:
+        """Get formatted context from messages."""
+        return "\n".join([
+            f"{msg['role']}: {msg['content']}"
+            for msg in self.messages
+        ])
+    
+    def clear(self) -> None:
+        """Clear all messages from memory."""
+        self.messages = []
+
+class EstimationState(TypedDict):
+    """State management for the PRD analysis process.
+    
+    This TypedDict defines the structure of the state that flows through the analysis graph.
+    The state maintains:
+    1. Input document content
+    2. Analysis results and their file location
+    3. Review and revision tracking
+    4. Conversation memory
+    
+    Attributes:
+        prd_doc: The content of the PRD document being analyzed
+        prd_analysis: The current analysis results, including key components, timeline, etc.
+        current_analysis_file: Path to the JSON file containing the current analysis
+        review_feedback: User's feedback type (accept/revise/add/remove)
+        revision_requests: List of specific revision requests from the user
+        revision_history: History of changes made during revisions
+        messages: List of conversation messages
+        conversation_memory: State of the conversation memory
+    """
+    # Input documents
+    prd_doc: Optional[str]  # PRD document content
+    
+    # PRD Analysis
+    prd_analysis: Optional[Dict[str, Any]]  # Analysis results including key components, timeline, assumptions, etc.
+    current_analysis_file: Optional[str]  # Path to the current analysis file
+    
+    # Review and revision tracking
+    review_feedback: Optional[Literal["accept", "revise", "add", "remove"]]
+    revision_requests: Optional[List[str]]  # List of specific revision requests
+    revision_history: Optional[List[Dict[str, Any]]]  # Track changes made
+    
+    # Conversation tracking
+    messages: Annotated[list, add_messages]
+    conversation_memory: Optional[dict]  # Store the conversation memory state
+
+def create_memory() -> CustomMemory:
+    """Create a new memory instance."""
+    return CustomMemory(max_tokens=MAX_CONTEXT_TOKENS, max_messages=MAX_MEMORY_ITEMS)
+
+def update_conversation_memory(state: EstimationState, role: str, content: str) -> dict:
+    """Update the conversation memory with a new message."""
+    # Initialize memory if not exists
+    if "conversation_memory" not in state or not state["conversation_memory"]:
+        memory = create_memory()
+    else:
+        # Recreate memory from state
+        memory = create_memory()
+        for msg in state["conversation_memory"].get("messages", []):
+            memory.add_message(msg["role"], msg["content"])
+    
+    # Add new message
+    memory.add_message(role, content)
+    
+    # Return updated memory state
+    return {
+        "messages": memory.get_messages(),
+        "output": content
+    }
+
+def get_conversation_context(state: EstimationState) -> str:
+    """Get the conversation context from memory with pretty printing."""
+    if not state.get("conversation_memory"):
+        return ""
+    
+    messages = state["conversation_memory"].get("messages", [])
+    log_memory_usage(messages, "context_retrieval")
+    
+    # Format messages into a plain text string for context
+    return "\n".join([
+        f"{msg['role']}: {msg['content']}"
+        for msg in messages
+    ])
+
+def display_conversation_context(messages: List[Dict[str, Any]]):
+    """Display the conversation context with pretty printing."""
+    for msg in messages:
+        console.print(format_message(msg["role"], msg["content"]))
 
 # Set up logging with rich formatting
 logging.basicConfig(
@@ -47,8 +270,9 @@ logging.basicConfig(
             markup=True,
             show_time=False,
             show_path=False
-        ),
-        logging.FileHandler(f'estimation_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+        )
+        # Commenting out file logging for now
+        # logging.FileHandler(f'estimation_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
     ]
 )
 logger = logging.getLogger("rich")
@@ -79,16 +303,6 @@ llm = init_chat_model(
 )
 
 # Define the state structure
-class EstimationState(TypedDict):
-    # Input documents
-    prd_doc: Optional[str]  # PRD document content
-    
-    # PRD Analysis
-    prd_analysis: Optional[Dict[str, Any]]  # Analysis results including key components, timeline, assumptions, etc.
-    
-    # Conversation tracking
-    messages: Annotated[list, add_messages]
-    conversation_memory: Optional[dict]
 
 def validate_and_merge_chunks(chunks: List[Dict[str, Any]], 
                             min_chunk_size: int = 800,  # Minimum size in tokens
@@ -560,7 +774,42 @@ Note:
         }
 
 def analyze_prd(state: EstimationState) -> EstimationState:
-    """Analyze the document and extract key information using parallel processing."""
+    """Analyze the document and extract key information using parallel processing.
+    
+    This function is the entry point for the analysis process. It:
+    1. Processes the PRD document into semantic chunks
+    2. Analyzes each chunk in parallel
+    3. Combines the results into a complete analysis
+    4. Saves the analysis to a file
+    5. Updates the state with both the analysis and file location
+    
+    The analysis is saved to a timestamped JSON file in the analysis_output directory,
+    and the file path is stored in state["current_analysis_file"] for later use by
+    the review and revision nodes.
+    
+    Args:
+        state: The current state containing the PRD document
+        
+    Returns:
+        Updated state containing:
+        - prd_analysis: The complete analysis results
+        - current_analysis_file: Path to the saved analysis file
+        - Additional metadata and processing information
+        
+    Example state flow:
+        Input state:
+            {
+                "prd_doc": "Project requirements...",
+                "prd_analysis": None,
+                "current_analysis_file": None
+            }
+        Output state:
+            {
+                "prd_doc": "Project requirements...",
+                "prd_analysis": {"Project Overview": [...], ...},
+                "current_analysis_file": "analysis_output/prd_analysis_20240314_123456.json"
+            }
+    """
     try:
         # Get the document content
         doc_content = state["prd_doc"]
@@ -808,12 +1057,18 @@ Consider the context of which section of the document you're analyzing.""")
             "processing_timestamp": datetime.now().isoformat()
         }
         
-        # Update state with analysis results
+        # Update state with analysis results and file location
         state["prd_analysis"] = analysis_results
         
-        # Log the analysis completion
+        # Save initial analysis to file and store path
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filepath = save_analysis_to_file(analysis_results, timestamp)
+        state["current_analysis_file"] = filepath
+        
+        # Log completion with file location
         logger.info("Document Analysis completed successfully")
         logger.info(f"Results include {sum(len(v) for k, v in analysis_results.items() if not k.startswith('_'))} total items")
+        logger.info(f"Analysis saved to: {filepath}")
         
     except Exception as e:
         logger.error(f"Error in document analysis: {e}")
@@ -831,12 +1086,21 @@ Consider the context of which section of the document you're analyzing.""")
 def save_analysis_to_file(analysis: Dict[str, Any], timestamp: str = None) -> str:
     """Save the analysis results to a JSON file.
     
+    This function handles saving the analysis results to a JSON file in the analysis_output directory.
+    Each analysis is saved with a timestamp to maintain a history of revisions.
+    
     Args:
-        analysis: The analysis results dictionary
+        analysis: The analysis results dictionary containing all sections and metadata
         timestamp: Optional timestamp to use in filename. If None, generates new timestamp.
     
     Returns:
         str: Path to the saved file
+        
+    Example:
+        >>> analysis = {"Project Overview": ["item1", "item2"]}
+        >>> filepath = save_analysis_to_file(analysis)
+        >>> print(filepath)
+        'analysis_output/prd_analysis_20240314_123456.json'
     """
     if timestamp is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -845,15 +1109,390 @@ def save_analysis_to_file(analysis: Dict[str, Any], timestamp: str = None) -> st
     output_dir = "analysis_output"
     os.makedirs(output_dir, exist_ok=True)
     
-    # Create filename
+    # Create filename with timestamp
     output_path = os.path.join(output_dir, f"prd_analysis_{timestamp}.json")
     
-    # Save to file
+    # Save to file with pretty printing
     with open(output_path, 'w') as f:
         json.dump(analysis, f, indent=2)
     
     logger.info(f"Analysis saved to: {output_path}")
     return output_path
+
+def load_analysis_from_file(filepath: str) -> Dict[str, Any]:
+    """Load analysis results from a JSON file.
+    
+    This function handles loading the analysis results from a previously saved JSON file.
+    It includes error handling for file operations and JSON parsing.
+    
+    Args:
+        filepath: Path to the analysis file to load
+        
+    Returns:
+        Dict containing the analysis results with all sections and metadata
+        
+    Raises:
+        ValueError: If the file doesn't exist or contains invalid JSON
+        FileNotFoundError: If the specified file cannot be found
+        
+    Example:
+        >>> analysis = load_analysis_from_file("analysis_output/prd_analysis_20240314_123456.json")
+        >>> print(analysis.keys())
+        ['Project Overview', 'Key Components', ...]
+    """
+    try:
+        with open(filepath, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logger.error(f"Analysis file not found: {filepath}")
+        raise
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in analysis file {filepath}: {e}")
+        raise ValueError(f"Invalid analysis file format: {e}")
+    except Exception as e:
+        logger.error(f"Error loading analysis from {filepath}: {e}")
+        raise
+
+def review_analysis(state: EstimationState) -> EstimationState:
+    """Review the PRD analysis and get user feedback."""
+    try:
+        # Get analysis from state
+        analysis = state["prd_analysis"]
+        if not analysis:
+            raise ValueError("No analysis results found in state")
+        
+        # Display current analysis with pretty printing
+        console.print("\n[bold blue]Current Analysis Results[/bold blue]")
+        
+        # Define sections to display
+        sections = [
+            "Project Overview and Objectives",
+            "Key Components/Modules",
+            "Timeline and Milestones",
+            "Critical Assumptions",
+            "Dependencies and Constraints",
+            "Resource Requirements",
+            "Risk Factors"
+        ]
+        
+        # Display each section
+        for section_name in sections:
+            if section_name in analysis and analysis[section_name]:
+                console.print(f"\n[bold]{section_name}[/bold]")
+                console.print(Panel(
+                    Text("\n".join(f"• {item}" for item in analysis[section_name]), style="white"),
+                    border_style="white"
+                ))
+        
+        # Get conversation context
+        context = get_conversation_context(state)
+        
+        # Get user feedback with natural language input
+        console.print("\n[bold yellow]Please review the analysis above and provide your feedback.[/bold yellow]")
+        console.print("[dim]You can:[/dim]")
+        console.print("• Accept the analysis as is")
+        console.print("• Request updates to any sections (additions, removals, or modifications)")
+        console.print("\n[dim]Please describe what changes you'd like to make in your own words.[/dim]")
+        
+        user_response = input("\nYour feedback: ").strip()
+        
+        # Update conversation memory with user's feedback
+        conversation_memory = update_conversation_memory(
+            state,
+            "user",
+            f"User provided feedback on analysis: {user_response}"
+        )
+        
+        # Simplified interpretation prompt
+        interpretation_prompt = f"""Given the following user response about PRD analysis, determine if they want to:
+        1. Accept the analysis as is
+        2. Make updates to the analysis
+        
+        Return ONLY one of these exact strings:
+        - "accept" if the user wants to accept the analysis as is
+        - "update" if the user wants to make any changes
+        
+        User response: "{user_response}"
+        
+        Return ONLY the action string, nothing else."""
+        
+        interpretation = llm.invoke([{"role": "user", "content": interpretation_prompt}]).content.strip().lower()
+        
+        # Log token usage
+        log_token_usage(interpretation_prompt, interpretation, "review_analysis")
+        
+        # Update memory with interpretation
+        conversation_memory = update_conversation_memory(
+            {**state, "conversation_memory": conversation_memory},
+            "assistant",
+            interpretation
+        )
+        
+        # Parse the interpretation
+        if interpretation == "accept":
+            logger.info("User accepted the analysis")
+            return {
+                **state,
+                "review_feedback": "accept",
+                "messages": state.get("messages", []) + [
+                    {"role": "user", "content": user_response},
+                    {"role": "assistant", "content": "Analysis accepted"}
+                ],
+                "conversation_memory": conversation_memory
+            }
+        else:
+            # Store the update request
+            revision_requests = state.get("revision_requests", [])
+            revision_requests.append(user_response)  # Store the full feedback
+            
+            logger.info(f"User requested updates: {user_response}")
+            return {
+                **state,
+                "review_feedback": "update",
+                "revision_requests": revision_requests,
+                "messages": state.get("messages", []) + [
+                    {"role": "user", "content": user_response},
+                    {"role": "assistant", "content": "Updates requested"}
+                ],
+                "conversation_memory": conversation_memory
+            }
+            
+    except Exception as e:
+        logger.error(f"Error in review_analysis: {e}")
+        # On error, default to accept to allow the process to continue
+        return {
+            **state,
+            "review_feedback": "accept",
+            "messages": state.get("messages", []) + [
+                {"role": "system", "content": f"Error in review, defaulting to accept: {str(e)}"}
+            ]
+        }
+
+def revise_analysis(state: EstimationState) -> EstimationState:
+    """Revise the PRD analysis based on user feedback."""
+    try:
+        # Get revision requests
+        revision_requests = state.get("revision_requests", [])
+        
+        if not revision_requests:
+            logger.info("No revision requests found, proceeding to summarize")
+            return {
+                **state,
+                "review_feedback": "accept"  # Force accept if no revisions
+            }
+        
+        # Load current analysis from file
+        current_file = state.get("current_analysis_file")
+        if not current_file or not os.path.exists(current_file):
+            raise ValueError("No analysis file available for revision")
+        
+        current_analysis = load_analysis_from_file(current_file)
+        
+        # Get conversation context
+        context = get_conversation_context(state)
+        
+        # Create a prompt for revision that handles mixed feedback
+        revision_prompt = f"""Please update the PRD analysis based on the following feedback.
+        The feedback may include additions, removals, or modifications to any section.
+        Return ONLY a valid JSON object with the same structure as the current analysis.
+        Do not include any other text or explanation.
+        
+        Current Analysis:
+        {json.dumps(current_analysis, indent=2)}
+        
+        User Feedback:
+        {json.dumps(revision_requests, indent=2)}
+        
+        Recent Context:
+        {context}
+        
+        Instructions:
+        1. Process all feedback as updates to the analysis
+        2. Add new items where requested
+        3. Remove items that should be removed
+        4. Modify existing items if needed
+        5. Keep the same JSON structure
+        6. Return ONLY the JSON object with the updated analysis
+        
+        Return ONLY the JSON object with the updated analysis."""
+        
+        # Get revision from LLM
+        response = llm.invoke([{"role": "user", "content": revision_prompt}])
+        
+        # Log token usage
+        log_token_usage(revision_prompt, response.content, "revise_analysis")
+        
+        # Clean the response content
+        content = response.content.strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        if content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+        
+        # Parse the revised analysis
+        try:
+            revised_analysis = json.loads(content)
+            
+            # Validate the structure
+            required_keys = [
+                "Project Overview and Objectives",
+                "Key Components/Modules",
+                "Timeline and Milestones",
+                "Critical Assumptions",
+                "Dependencies and Constraints",
+                "Resource Requirements",
+                "Risk Factors"
+            ]
+            
+            # Ensure all required keys exist
+            for key in required_keys:
+                if key not in revised_analysis:
+                    revised_analysis[key] = []
+                elif not isinstance(revised_analysis[key], list):
+                    revised_analysis[key] = [str(revised_analysis[key])]
+                else:
+                    # Convert all items to strings
+                    revised_analysis[key] = [str(item) for item in revised_analysis[key]]
+            
+            # Update revision history
+            revision_history = state.get("revision_history", [])
+            revision_history.append({
+                "timestamp": datetime.now().isoformat(),
+                "requests": revision_requests,
+                "changes": {
+                    "before": current_analysis,
+                    "after": revised_analysis
+                }
+            })
+            
+            # Save revised analysis to new file
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            new_filepath = save_analysis_to_file(revised_analysis, timestamp)
+            
+            # Update memory with revision
+            conversation_memory = update_conversation_memory(
+                state,
+                "assistant",
+                f"Updated analysis based on user feedback"
+            )
+            
+            logger.info("Successfully updated analysis")
+            return {
+                **state,
+                "prd_analysis": revised_analysis,
+                "current_analysis_file": new_filepath,
+                "revision_history": revision_history,
+                "revision_requests": [],  # Clear requests after processing
+                "messages": state.get("messages", []) + [
+                    {"role": "assistant", "content": "Analysis has been updated based on your feedback."}
+                ],
+                "conversation_memory": conversation_memory
+            }
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse updated analysis: {e}")
+            logger.error(f"Raw response: {content}")
+            # On parsing error, keep the current analysis and proceed to review
+            return {
+                **state,
+                "messages": state.get("messages", []) + [
+                    {"role": "system", "content": "Failed to parse updated analysis, keeping current version."}
+                ]
+            }
+            
+    except Exception as e:
+        logger.error(f"Error in revise_analysis: {e}")
+        # On error, keep the current analysis and proceed to review
+        return {
+            **state,
+            "messages": state.get("messages", []) + [
+                {"role": "system", "content": f"Error in revision, keeping current version: {str(e)}"}
+            ]
+        }
+
+def summarize_analysis(state: EstimationState) -> EstimationState:
+    """Create a final summary of the accepted analysis."""
+    try:
+        analysis = state["prd_analysis"]
+        revision_history = state.get("revision_history", [])
+        
+        if not analysis:
+            raise ValueError("No analysis results found in state")
+        
+        # Create summary panels
+        console.print("\n[bold green]Final Analysis Summary[/bold green]")
+        
+        # Summary of key points
+        console.print("\n[bold]Key Points:[/bold]")
+        for section_name in [
+            "Project Overview and Objectives",
+            "Key Components/Modules",
+            "Timeline and Milestones",
+            "Critical Assumptions",
+            "Dependencies and Constraints",
+            "Resource Requirements",
+            "Risk Factors"
+        ]:
+            if section_name in analysis and analysis[section_name]:
+                items = analysis[section_name]
+                if items:  # Only show sections with content
+                    console.print(f"\n[bold]{section_name}[/bold]")
+                    console.print(Panel(
+                        Text("\n".join(f"• {item}" for item in items[:3]), style="white"),  # Show top 3 items
+                        border_style="white"
+                    ))
+        
+        # Summary of revision history
+        if revision_history:
+            console.print("\n[bold]Revision History:[/bold]")
+            for i, revision in enumerate(revision_history, 1):
+                console.print(f"\nRevision {i}:")
+                console.print(Panel(
+                    Text(f"Requests: {json.dumps(revision['requests'], indent=2)}", style="dim"),
+                    border_style="dim"
+                ))
+        
+        # Save final analysis
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = save_analysis_to_file(analysis, timestamp)
+        
+        # Add summary to state
+        summary = {
+            "timestamp": timestamp,
+            "output_path": output_path,
+            "total_sections": len([k for k in analysis.keys() if not k.startswith("_")]),
+            "total_items": sum(len(v) for k, v in analysis.items() if not k.startswith("_")),
+            "revision_count": len(revision_history)
+        }
+        
+        # Update memory with summary
+        conversation_memory = update_conversation_memory(
+            state,
+            "assistant",
+            f"Analysis complete! Summary: {json.dumps(summary, indent=2)}"
+        )
+        
+        return {
+            **state,
+            "messages": state.get("messages", []) + [
+                {"role": "assistant", "content": f"Analysis complete! Results saved to: {output_path}"}
+            ],
+            "conversation_memory": conversation_memory
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in summarize_analysis: {e}")
+        return state
+
+def router(state: EstimationState) -> Literal["revise_analysis", "summarize_analysis"]:
+    """Route based on review feedback."""
+    if state["review_feedback"] == "accept":
+        return "summarize_analysis"
+    else:
+        return "revise_analysis"  # Handle both "update" and other feedback types
 
 def format_value(value: Any) -> str:
     """Format a value (list, dict, or string) into a readable string."""
@@ -950,20 +1589,37 @@ def create_estimation_graph():
         EstimationState,
         config_schema={
             "recursion_limit": 25,  # Match system recursion limit
-            "max_iterations": 1     # Only need one iteration for PRD analysis
+            "max_iterations": 10    # Allow multiple revisions
         }
     )
     
     # Add nodes
     builder.add_node("analyze_prd", analyze_prd)
-    builder.add_node("pretty_print_analysis", pretty_print_analysis)
+    builder.add_node("review_analysis", review_analysis)
+    builder.add_node("revise_analysis", revise_analysis)
+    builder.add_node("summarize_analysis", summarize_analysis)
     
     # Set entry point
     builder.set_entry_point("analyze_prd")
     
-    # Simple linear flow with direct edges
-    builder.add_edge("analyze_prd", "pretty_print_analysis")
-    builder.add_edge("pretty_print_analysis", END)
+    # Add edges
+    builder.add_edge("analyze_prd", "review_analysis")
+    
+    # Add conditional edges based on review feedback
+    builder.add_conditional_edges(
+        "review_analysis",
+        router,
+        {
+            "revise_analysis": "revise_analysis",
+            "summarize_analysis": "summarize_analysis"
+        }
+    )
+    
+    # Add edge from revise back to review
+    builder.add_edge("revise_analysis", "review_analysis")
+    
+    # Add final edge to end
+    builder.add_edge("summarize_analysis", END)
     
     # Create the graph
     graph = builder.compile()
