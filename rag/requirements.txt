@@ -1,0 +1,13 @@
+python-dotenv==1.1.0       # latest stable as of Mar 25 2025 :contentReference[oaicite:1]{index=1}
+langchain==0.3.25          # latest core package as of May 2 2025 :contentReference[oaicite:2]{index=2}
+langchain-community==0.3.25 # latest integration package as of Jun 10 2025 :contentReference[oaicite:3]{index=3}
+langchain-openai==0.3.23   # latest as per PyPI stats :contentReference[oaicite:4]{index=4}
+unstructured==0.5.0        # latest unstructured library on PyPI :contentReference[oaicite:5]{index=5}
+# onnxruntime==1.17.1      # leave as commented; install separately if needed
+chromadb==1.0.12           # latest core database package as of May 31 2025 :contentReference[oaicite:6]{index=6}
+openai==1.86.0             # latest from GitHub releases on Jun 10 2025 :contentReference[oaicite:7]{index=7}
+tiktoken==0.9.0            # latest tokeniser version as of Feb 14 2025 :contentReference[oaicite:8]{index=8}
+langchain-chroma
+dill==0.3.6
+
+# install mar

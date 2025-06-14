@@ -1,0 +1,12 @@
+# Ignore virtual environment
+.venv/
+
+# Ignore CSV files
+*.csv
+
+# Ignore Markdown files
+*.md
+
+# Ignore chroma folder
+chroma/ 
+.DS_Store
