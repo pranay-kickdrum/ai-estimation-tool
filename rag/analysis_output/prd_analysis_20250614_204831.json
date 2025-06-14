@@ -1,0 +1,100 @@
+{
+  "Project Overview and Objectives": [
+    "Intelerad is responsible for providing all system, software, and other access requested by Kickdrum in order to complete the deliverables for all SOWs.",
+    "Intelerad will provide infrastructure to the Kickdrum team in order to design, develop, build, deploy, and test deliverables.",
+    "Kickdrum Technology Group will work with Intelerad teams to develop an AWS infrastructure capable of supporting the Ambra image storage solution, perform cost, usage, and customer analysis, implement one-time S3 bucketing and tagging, and support two phases of customer migrations.",
+    "The project, Ambra Storage Migration, aims to migrate the primary image storage solution for Ambra, a service acquired by Intelerad, to Amazon Web Services (AWS). Currently, AWS is used by Ambra solely for disaster recovery purposes. The project does not include the migration of the database and related services, which will be covered in a separate Statement of Work.",
+    "Throughout the project, Kickdrum may maintain relationships with Intelerad\u2019s partners and/or vendors in order to accomplish the goals of the project."
+  ],
+  "Key Components/Modules": [
+    "Access Rights / Access to Systems / Required Accounts & Adequate Infrastructure",
+    "Backup Storage",
+    "Browser Matrix/Support",
+    "Client upgrades",
+    "Cloud Fees",
+    "Cloud Provider",
+    "Commercially Reasonable Efforts",
+    "Content Delivery Network (CDN)",
+    "Cost Optimization Analysis and Planning",
+    "Cost Tracking Automation, Reporting, and One-Time Setup",
+    "Direct Connects/High throughput Data Transfer",
+    "Domain Names",
+    "Domain Subject Matter Experts",
+    "Escalation",
+    "Existing Components",
+    "Intelerad Users",
+    "Internal Intelerad Full Time Equivalents (FTEs) Responsibilities",
+    "Knowledge Transfer, Training, and Documentation",
+    "Licenses",
+    "Log Storage",
+    "Management Resources",
+    "Open Source Licensing",
+    "Partnership",
+    "Pro-rated Additional Time",
+    "Regulatory Compliance",
+    "SSL Certificates",
+    "Scope Substitutions",
+    "Security",
+    "Storage Migration",
+    "Testing",
+    "Third Party Application Tool Licenses"
+  ],
+  "Timeline and Milestones": [
+    "Cost Optimization Planning and Customer Assignment - Month 1",
+    "Cost Tracking Automation and Setup - Month 2",
+    "Cost optimization analysis and planning is expected to last for a period of 4 weeks.",
+    "Storage Migration Setup, Performance Testing and Improvement, and Client Migrations - Months 2-4",
+    "Storage Performance Benchmark Setup - Month 2",
+    "The project will begin on May 16, 2022 and end on August 31, 2022."
+  ],
+  "Critical Assumptions": [
+    "Additional SOW may be required if the project requires significantly more hours due to unforeseen circumstances",
+    "All static assets including logo, favicon and font files will be provided by Intelerad.",
+    "Intelerad intends to use Kickdrum as their non-exclusive reseller for AWS services",
+    "Intelerad will be responsible for all requirements related to and the performance of client upgrades including the deployment and use of any software or other deliverable Kickdrum develops as part of the SOWs.",
+    "Intelerad will be solely responsible for providing all lower environment capabilities, access, and configurations to Kickdrum personnel.",
+    "Kickdrum can replace any resource with a suitable or equivalently-skilled person, after notifying Intelerad",
+    "Kickdrum will provide performance optimizations limited to that described in the scope of the SOWs or appendices in order to support database migrations within overnight, offline maintenance windows.",
+    "Kickdrum\u2019s schedule is wholly dependent on Intelerad to provide necessary access to source code, test suites, and system access.",
+    "The infrastructure will be of sufficient scale to perform these responsibilities without unforeseen delays or interruptions.",
+    "Travel by Kickdrum resources to Intelerad facilities will be considered based on health and travel restrictions and guidelines"
+  ],
+  "Dependencies and Constraints": [
+    "Completion of AWS Administrative Tasks by Intelerad for AWS payments",
+    "Intelerad is responsible for any encryption of stored data within production and non-production environment data centers at any Intelerad or client location.",
+    "Intelerad is solely responsible for maintaining and updating security best practices to protect Intelerad and client infrastructure, data, and source code that is accessed by Kickdrum resources.",
+    "Intelerad's agreement to use Kickdrum as their AWS reseller",
+    "Kickdrum will not be held responsible for a Partner\u2019s delay or inability to provide timely, high-quality deliverables.",
+    "Kickdrum will not be held responsible for delivering to timelines that are associated with an Intelerad responsibility or responsible third party.",
+    "Kickdrum's decision on when team members will be available in person",
+    "Performance and scale dependencies are limited to the scope of the SOWs or appendices.",
+    "Possibility of additional SOW required due to unforeseen circumstances",
+    "The project is dependent on Intelerad providing necessary access to source code, test suites, and system access."
+  ],
+  "Resource Requirements": [
+    "Intelerad will provide Kickdrum developers with any accounts required to access wikis, issue management, source control, build, communication and collaboration, messaging, or other systems used by Intelerad project teams to deliver similar projects.",
+    "Intelerad will purchase SSL certificates (preferably wildcard) for the service\u2019s chosen domain names and install them on any SSL termination points.",
+    "Intelerad will purchase any required DNS names.",
+    "Kickdrum is supplying a team including a Partner / Solution Architect, Project Manager, Business Analyst, DB Architect, Technical Lead, Software Development / devOps Engineers, and Quality Assurance Engineer.",
+    "Kickdrum will be responsible for providing its own facilities, equipment, and infrastructure for employees and contractors",
+    "Kickdrum will provide a list of all required third party application tool licenses and Intelerad will provide and pay for all aforementioned third party application tools to perform storage migration, application deconstruction and refactoring, or other purposes."
+  ],
+  "Risk Factors": [
+    "Changes to individual sprints will be made during regular sprint triage, backlog, and planning meetings, but such changes shall not increase or otherwise modify the monthly fixed fee payable by Intelerad.",
+    "Delays in providing Kickdrum with Intelerad access may result in incremental costs.",
+    "Intelerad assumes all risk of Scope substitutions invalidating AWS funding.",
+    "Intelerad shall have final approval regarding any changes to the technology components should they differ from those described in this SOW.",
+    "Intelerad's obligation to complete AWS Administrative Tasks for AWS payments",
+    "Kickdrum reserves the right to request additional funding from Intelerad if the proposed scope replacement results in an increase in effort.",
+    "Kickdrum will not be responsible for the security and privacy of data shared by Intelerad that is not protected by security best practices, including multi-factor authentication.",
+    "Possible health and travel restrictions affecting resource availability",
+    "Potential unforeseen circumstances requiring additional hours",
+    "Risk of termination of SOW prior to receipt of Intelerad Payment 1"
+  ],
+  "_metadata": {
+    "total_chunks": 3,
+    "completed_chunks": 3,
+    "failed_chunks": 0,
+    "processing_timestamp": "2025-06-14T20:48:31.944100"
+  }
+}

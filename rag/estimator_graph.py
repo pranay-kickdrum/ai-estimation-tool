@@ -21,6 +21,7 @@ import json
 import pprint
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
+from pathlib import Path
 # from langgraph.graph import visualize_graph
 
 # Set up rich console
@@ -45,6 +46,18 @@ logger = logging.getLogger("rich")
 
 # Load environment variables
 load_dotenv()
+
+# Get data directory from environment variable
+DATA_PATH = os.getenv("DATA_PATH")
+if not DATA_PATH:
+    raise EnvironmentError("DATA_PATH environment variable is not set. Please set it to the path of your data directory.")
+
+# Convert to absolute path if relative
+DATA_PATH = os.path.abspath(DATA_PATH)
+if not os.path.exists(DATA_PATH):
+    raise EnvironmentError(f"Data directory not found at: {DATA_PATH}")
+
+logger.info(f"Using data directory: {DATA_PATH}")
 
 # Initialize LLM
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -165,7 +178,8 @@ def analyze_prd(state: EstimationState) -> EstimationState:
         
         # Preprocess the PRD content
         chunks = split_into_chunks(prd_content, max_tokens=3000)
-        logger.info(f"Split PRD into {len(chunks)} chunks for analysis")
+        total_chunks = len(chunks)
+        logger.info(f"Split PRD into {total_chunks} chunks for analysis")
         
         # Initialize analysis results
         analysis_results = {
@@ -195,13 +209,17 @@ Keep your analysis concise and focused on the most important points.""")
         # Create a partial function with the common arguments
         analyze_chunk_partial = partial(
             analyze_chunk,
-            total_chunks=len(chunks),
+            total_chunks=total_chunks,
             llm=llm,
             system_message=system_message
         )
         
+        # Track progress
+        completed_chunks = 0
+        failed_chunks = 0
+        
         # Process chunks in parallel using ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=min(4, len(chunks))) as executor:
+        with ThreadPoolExecutor(max_workers=min(4, total_chunks)) as executor:
             # Submit all chunks for processing
             future_to_chunk = {
                 executor.submit(analyze_chunk_partial, chunk, i+1): i+1 
@@ -213,24 +231,53 @@ Keep your analysis concise and focused on the most important points.""")
                 chunk_num = future_to_chunk[future]
                 try:
                     chunk_analysis = future.result()
-                    # Merge results
-                    for key in analysis_results:
-                        if key in chunk_analysis and chunk_analysis[key]:
-                            analysis_results[key].extend(chunk_analysis[key])
+                    if chunk_analysis:  # Only merge if we got valid results
+                        # Merge results
+                        for key in analysis_results:
+                            if key in chunk_analysis and chunk_analysis[key]:
+                                analysis_results[key].extend(chunk_analysis[key])
+                        completed_chunks += 1
+                    else:
+                        failed_chunks += 1
+                        
+                    # Log progress
+                    logger.info(f"Progress: {completed_chunks + failed_chunks}/{total_chunks} chunks processed "
+                              f"({completed_chunks} successful, {failed_chunks} failed)")
+                    
                 except Exception as e:
+                    failed_chunks += 1
                     logger.error(f"Chunk {chunk_num} generated an exception: {e}")
+                    logger.info(f"Progress: {completed_chunks + failed_chunks}/{total_chunks} chunks processed "
+                              f"({completed_chunks} successful, {failed_chunks} failed)")
+        
+        # Log final processing status
+        logger.info(f"All chunks processed. Final status: {completed_chunks} successful, {failed_chunks} failed")
+        
+        if completed_chunks == 0:
+            raise ValueError("No chunks were successfully processed")
         
         # Deduplicate and clean up results
         for key in analysis_results:
             analysis_results[key] = list(set(analysis_results[key]))  # Remove duplicates
             analysis_results[key].sort()  # Sort for consistency
         
+        # Add processing metadata to results
+        analysis_results["_metadata"] = {
+            "total_chunks": total_chunks,
+            "completed_chunks": completed_chunks,
+            "failed_chunks": failed_chunks,
+            "processing_timestamp": datetime.now().isoformat()
+        }
+        
+        # Update state with analysis results
         state["prd_analysis"] = analysis_results
         
-        # Log the analysis
-        logger.info("PRD Analysis completed")
+        # Log the analysis completion
+        logger.info("PRD Analysis completed successfully")
         logger.info(Panel(
-            Text(str(state["prd_analysis"]), style="green"),
+            Text(f"Analysis completed with {completed_chunks}/{total_chunks} chunks processed successfully.\n"
+                 f"Results include {sum(len(v) for k, v in analysis_results.items() if not k.startswith('_'))} total items.",
+                 style="green"),
             title="[green]PRD Analysis Results[/green]",
             border_style="green"
         ))
@@ -239,7 +286,11 @@ Keep your analysis concise and focused on the most important points.""")
         logger.error(f"Error in PRD analysis: {e}")
         state["prd_analysis"] = {
             "error": str(e),
-            "status": "failed"
+            "status": "failed",
+            "_metadata": {
+                "error_timestamp": datetime.now().isoformat(),
+                "error_type": type(e).__name__
+            }
         }
     
     return state
@@ -397,39 +448,128 @@ def create_estimation_graph():
     
     return graph
 
-def main():
-    """Main function to run the estimation graph."""
-    print("Welcome to the AI Estimation Tool!")
-    print("Processing PRD from data directory...")
+def find_prd_files(data_dir: str = None) -> List[str]:
+    """Find all supported document files in the data directory.
     
-    # Initialize the graph (this will also generate the visualization)
-    graph = create_estimation_graph()
+    Args:
+        data_dir: Optional directory to search for files. If None, uses DATA_PATH.
+        
+    Returns:
+        List of paths to supported document files (.md, .txt, .pdf)
+    """
+    if data_dir is None:
+        data_dir = DATA_PATH
+    
+    if not os.path.exists(data_dir):
+        raise FileNotFoundError(f"Data directory '{data_dir}' not found")
+    
+    supported_files = []
+    for file in os.listdir(data_dir):
+        if file.endswith(('.md', '.txt', '.pdf')):
+            supported_files.append(os.path.join(data_dir, file))
+    
+    return sorted(supported_files)  # Sort files for consistent ordering
+
+def read_prd_file(file_path: str) -> str:
+    """Read and validate a PRD file.
+    
+    Args:
+        file_path: Path to the PRD file
+        
+    Returns:
+        Content of the PRD file
+        
+    Raises:
+        FileNotFoundError: If file doesn't exist
+        ValueError: If file is empty or too large
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"PRD file not found: {file_path}")
+    
+    # Check file size (limit to 10MB)
+    file_size = os.path.getsize(file_path)
+    if file_size == 0:
+        raise ValueError(f"PRD file is empty: {file_path}")
+    if file_size > 10 * 1024 * 1024:  # 10MB
+        raise ValueError(f"PRD file too large ({file_size/1024/1024:.1f}MB): {file_path}")
     
     try:
-        # Read PRD from data directory
-        prd_path = "data/ambra-storage-migration.md"
-        with open(prd_path, 'r') as f:
-            prd_content = f.read()
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            if not content.strip():
+                raise ValueError(f"PRD file is empty after reading: {file_path}")
+            return content
+    except UnicodeDecodeError:
+        raise ValueError(f"PRD file is not valid UTF-8 text: {file_path}")
+
+def main():
+    """Main function to run the estimation graph."""
+    console.print("\n[bold blue]Welcome to the AI Estimation Tool![/bold blue]")
+    console.print(f"[dim]Using data directory: {DATA_PATH}[/dim]")
+    
+    try:
+        # Find document files
+        doc_files = find_prd_files()
+        if not doc_files:
+            console.print("\n[red]No supported files found in the data directory.[/red]")
+            console.print(f"Please add document files (.md, .txt, or .pdf) to: {DATA_PATH}")
+            return
         
-        # Initialize state with PRD content
+        # Display available files
+        console.print("\n[bold]Available document files:[/bold]")
+        for i, file_path in enumerate(doc_files, 1):
+            # Show relative path if file is in a subdirectory
+            rel_path = os.path.relpath(file_path, DATA_PATH)
+            console.print(f"{i}. {rel_path}")
+        
+        # Let user select a file
+        while True:
+            try:
+                selection = input("\nEnter the number of the document to analyze (or 'q' to quit): ").strip()
+                if selection.lower() == 'q':
+                    return
+                
+                file_index = int(selection) - 1
+                if 0 <= file_index < len(doc_files):
+                    selected_file = doc_files[file_index]
+                    break
+                else:
+                    console.print("[red]Invalid selection. Please try again.[/red]")
+            except ValueError:
+                console.print("[red]Please enter a valid number.[/red]")
+        
+        # Read the selected file
+        rel_path = os.path.relpath(selected_file, DATA_PATH)
+        console.print(f"\n[bold]Reading document: {rel_path}[/bold]")
+        doc_content = read_prd_file(selected_file)  # We'll keep the function name for now
+        
+        # Initialize the graph
+        console.print("\n[bold]Initializing analysis graph...[/bold]")
+        graph = create_estimation_graph()
+        
+        # Initialize state with document content
         initial_state = {
-            "prd_doc": prd_content,  # PRD content loaded from file
-            "prd_analysis": None,    # Will be populated by analyze_prd node
+            "prd_doc": doc_content,  # We'll keep the state key name for now
+            "prd_analysis": None,
             "messages": [],
             "conversation_memory": None
         }
         
         # Run the graph
+        console.print("\n[bold]Starting analysis...[/bold]")
         for event in graph.stream(initial_state):
             # Process events and update state
             pass
             
-    except FileNotFoundError:
-        print(f"\nError: Could not find PRD file at {prd_path}")
+    except FileNotFoundError as e:
+        console.print(f"\n[red]Error: {str(e)}[/red]")
+    except ValueError as e:
+        console.print(f"\n[red]Error: {str(e)}[/red]")
     except KeyboardInterrupt:
-        print("\nOperation cancelled by user.")
+        console.print("\n[yellow]Operation cancelled by user.[/yellow]")
     except Exception as e:
-        print(f"\nAn error occurred: {e}")
+        console.print(f"\n[red]An unexpected error occurred: {str(e)}[/red]")
+        logger.exception("Unexpected error in main function")
 
 if __name__ == "__main__":
     main() 

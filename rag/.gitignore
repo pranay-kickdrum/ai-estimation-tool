@@ -11,3 +11,4 @@
 chroma/ 
 .DS_Store
 *.log
+*.png
