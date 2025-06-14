@@ -10,3 +10,4 @@
 # Ignore chroma folder
 chroma/ 
 .DS_Store
+*.log

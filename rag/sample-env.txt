@@ -4,3 +4,5 @@ CHUNK_OVERLAP=64
 CHROMA_PATH=chroma
 DATA_PATH=data/
 PERT_DIR=pert
+LANGCHAIN_API_KEY=your_api_key_here
+LANGCHAIN_PROJECT=ai-estimation-tool  
